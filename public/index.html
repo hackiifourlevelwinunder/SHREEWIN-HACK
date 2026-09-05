@@ -83,6 +83,11 @@ button{font:inherit}
 .predictionActive.show{display:block;animation:resultIn .35s ease both}
 .predictionLabel{font-size:9px;color:#57f2b0;letter-spacing:1.5px;font-weight:1000}
 .predictionNumber{margin-top:8px;font-size:45px;font-weight:1000;color:#64e8ff;text-shadow:0 0 18px #45d7ff55}
+.predictionNumber.even{color:#ff3b5f;text-shadow:0 0 18px #ff3b5f66}
+.predictionNumber.odd{color:#57f2b0;text-shadow:0 0 18px #57f2b066}
+.predictionSize{margin-top:2px;font-size:12px;font-weight:1000;letter-spacing:1.5px}
+.predictionSize.small{color:#64e8ff}
+.predictionSize.big{color:#ffd75a}
 .predictionMeta{font-size:10px;color:#86aeb7;margin-top:5px}
 .resultSection{margin-top:24px;padding-top:5px}
 .resultHeader{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
@@ -241,13 +246,14 @@ button{font:inherit}
 
 <div class="lockCard">
 <div class="lockCircle"><div class="lockIcon">♙</div></div>
-<h2>Prediction Locked</h2>
-<p>Enter your Game UID to open the access panel.</p>
+<h2 id="panelTitle">Prediction Locked</h2>
+<p id="panelSubtitle">Enter your Game UID to open the access panel.</p>
 <button class="unlockBtn" id="unlockBtn">🛡 &nbsp; UNLOCK HACK ⚡</button>
 
 <div class="predictionActive" id="predictionActive">
 <div class="predictionLabel">ACCESS ACTIVE • DEMO PREDICTION</div>
 <div class="predictionNumber" id="predictionNumber">—</div>
+<div class="predictionSize" id="predictionSize">—</div>
 <div class="predictionMeta" id="predictionMeta">Access is controlled by the demo admin panel.</div>
 </div>
 </div>
@@ -441,8 +447,31 @@ button{font:inherit}
     if(b){b.disabled=false;b.textContent="VERIFY & UNLOCK ⚡"}
   }
 }
-  function showActive(uid,data){currentUID=uid;$("predictionActive")?.classList.add("show");setText("predictionNumber",demoPrediction(uid));setText("predictionMeta",`UID ${uid} active • ${data?.expiresAt?"access expires "+new Date(data.expiresAt).toLocaleString():"access approved"} • DEMO ONLY`);$("unlockBtn")?.style.setProperty("display","none")}
-  function demoPrediction(uid){let h=0;for(const c of String(uid))h=(h*31+c.charCodeAt(0))>>>0;return h%10}
+  function getMinutePrediction(){return Math.floor(Date.now()/60000)%10}
+  function updateMinutePrediction(){
+    const n=getMinutePrediction();
+    const size=n>=5?"BIG":"SMALL";
+    const numberEl=$("predictionNumber"), sizeEl=$("predictionSize");
+    if(numberEl){
+      numberEl.textContent=String(n);
+      numberEl.classList.toggle("even",n%2===0);
+      numberEl.classList.toggle("odd",n%2!==0);
+    }
+    if(sizeEl){
+      sizeEl.textContent=size;
+      sizeEl.classList.toggle("big",n>=5);
+      sizeEl.classList.toggle("small",n<5);
+    }
+  }
+  function showActive(uid,data){
+    currentUID=uid;
+    setText("panelTitle","PANEL ACTIVE SUCCESSFUL");
+    setText("panelSubtitle","Your approved Game UID has opened the access panel.");
+    $("predictionActive")?.classList.add("show");
+    updateMinutePrediction();
+    setText("predictionMeta",`UID ${uid} active • ${data?.expiresAt?"access expires "+new Date(data.expiresAt).toLocaleString():"access approved"} • DEMO ONLY`);
+    $("unlockBtn")?.style.setProperty("display","none");
+  }
   async function restoreUID(){const uid=localStorage.getItem(UID_KEY);if(!uid)return;const r=await apiJSON("/api/access/status",{method:"POST",body:JSON.stringify({uid,deviceId})});if(r.ok&&(r.data?.active===true||r.data?.status==="active")){showActive(uid,r.data)}else localStorage.removeItem(UID_KEY)}
 
   /* ADMIN */
@@ -465,7 +494,7 @@ button{font:inherit}
     $("copyBtn")?.addEventListener("click",async()=>{if(!currentPeriod)return;try{await navigator.clipboard.writeText(currentPeriod);$("copyBtn").textContent="✓ Copied";setTimeout(()=>$("copyBtn").textContent="▣  Copy Period",1200)}catch(e){}});
     $("adminLaunch")?.addEventListener("click",()=>{$("adminOverlay").classList.add("show");if(adminToken){$("adminLoginBox").style.display="none";$("adminControls").style.display="block";loadUIDs()}}); $("adminClose")?.addEventListener("click",()=>$("adminOverlay").classList.remove("show")); $("adminLoginBtn")?.addEventListener("click",adminLogin); $("adminActivate")?.addEventListener("click",activateUID); $("adminDeactivateAll")?.addEventListener("click",lockAll); $("adminLogout")?.addEventListener("click",()=>{adminToken="";sessionStorage.removeItem(ADMIN_TOKEN_KEY);$("adminControls").style.display="none";$("adminLoginBox").style.display="grid";adminMsg("Logged out successfully.")});
     document.querySelectorAll(".navItem").forEach(n=>n.addEventListener("click",()=>{document.querySelectorAll(".navItem").forEach(x=>x.classList.remove("active"));n.classList.add("active");const tab=n.dataset.tab;if(tab==="history"){$("resultSection")?.scrollIntoView({behavior:"smooth"});}else if(tab==="uid")openUnlock();else if(tab==="telegram")location.href=REGISTER_URL;else scrollTo({top:0,behavior:"smooth"})}));
-    setInterval(()=>{syncCountdown();if(seconds===60)loadResults()},1000); setInterval(loadResults,30000); setInterval(demoValues,2500); setInterval(()=>{if(adminToken)loadUIDs()},30000);
+    setInterval(()=>{syncCountdown();updateMinutePrediction();if(seconds===60)loadResults()},1000); setInterval(loadResults,30000); setInterval(demoValues,2500); setInterval(()=>{if(adminToken)loadUIDs()},30000);
   });
   document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"){syncCountdown();loadResults()}});
 })();
