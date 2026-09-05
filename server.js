@@ -18,7 +18,7 @@ const REQUEST_FILE =
 
 const ADMIN_PASSWORD =
   process.env.ADMIN_PASSWORD ||
-  "673634078162";
+  "jay@9090";
 
 const REGISTER_URL =
   "https://www.shreewin55.com/#/register?invitationCode=86286195967";
