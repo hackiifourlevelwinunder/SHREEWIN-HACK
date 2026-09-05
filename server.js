@@ -4,1449 +4,787 @@ const path = require("path");
 const crypto = require("crypto");
 
 const app = express();
-
-const PORT = process.env.PORT || 10000;
-
+const PORT = Number(process.env.PORT || 10000);
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "jay@9090";
 const DATA_DIR = path.join(__dirname, "data");
-const PUBLIC_DIR = path.join(__dirname, "public");
-
-const UID_FILE =
-  path.join(DATA_DIR, "uids.json");
-
-const REQUEST_FILE =
-  path.join(DATA_DIR, "uid_requests.json");
-
-const ADMIN_PASSWORD =
-  process.env.ADMIN_PASSWORD ||
-  "jay@9090";
-
-const REGISTER_URL =
-  "https://www.shreewin55.com/#/register?invitationCode=86286195967";
+const DATA = path.join(DATA_DIR, "uids.json");
 
 const HISTORY_URL =
   "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
 
-app.use(express.json({ limit: "1mb" }));
+fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(DATA)) fs.writeFileSync(DATA, "[]");
 
-app.use(
-  express.urlencoded({
-    extended: true
-  })
-);
+app.use(express.json({ limit: "100kb" }));
+app.use(express.urlencoded({ extended: false }));
 
+const adminTokens = new Map();
+const accessRequests = new Map();
 
-/* ================================
-   DATA SETUP
-================================ */
+let historyCache = null;
+let historyCacheAt = 0;
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, {
-    recursive: true
-  });
+function readDB() {
+  try {
+    const x = JSON.parse(fs.readFileSync(DATA, "utf8"));
+    return Array.isArray(x) ? x : [];
+  } catch {
+    return [];
+  }
 }
 
+function writeDB(x) {
+  fs.writeFileSync(DATA, JSON.stringify(x, null, 2));
+}
 
-function ensureFile(file, data) {
+function clean() {
+  const now = Date.now();
 
-  if (!fs.existsSync(file)) {
+  const a = readDB().filter(
+    x => Number(x.expiresAt) > now
+  );
 
-    fs.writeFileSync(
-      file,
-      JSON.stringify(
-        data,
-        null,
-        2
-      )
-    );
+  writeDB(a);
+  return a;
+}
 
+function validUid(u) {
+  return /^\d{5,8}$/.test(String(u || ""));
+}
+
+function adminAuth(req) {
+  const token = String(
+    req.headers.authorization || ""
+  ).replace(/^Bearer\s+/i, "");
+
+  const oldToken = String(
+    req.headers["x-admin-token"] || ""
+  );
+
+  const t = token || oldToken;
+
+  const row = adminTokens.get(t);
+
+  if (row && row.expiresAt > Date.now()) {
+    return true;
   }
 
+  if (t === "AMBIKA-" + ADMIN_PASSWORD) {
+    return true;
+  }
+
+  return false;
 }
 
+function issueToken() {
+  const token = crypto
+    .randomBytes(32)
+    .toString("hex");
 
-ensureFile(UID_FILE, []);
+  adminTokens.set(token, {
+    expiresAt: Date.now() + 12 * 60 * 60 * 1000
+  });
 
-ensureFile(
-  REQUEST_FILE,
-  []
-);
+  return token;
+}
 
+function jsonFromText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
 
-function readJSON(file, fallback) {
+/* LIVE HISTORY PROXY */
+
+app.get("/api/history", async (req, res) => {
+  const controller = new AbortController();
+
+  const timeout = setTimeout(
+    () => controller.abort(),
+    12000
+  );
 
   try {
+    const r = await fetch(HISTORY_URL, {
+      method: "GET",
+      signal: controller.signal,
 
-    return JSON.parse(
-      fs.readFileSync(
-        file,
-        "utf8"
-      )
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+
+        "Accept":
+          "application/json,text/plain,*/*",
+
+        "Referer":
+          "https://draw.ar-lottery01.com/"
+      },
+
+      cache: "no-store"
+    });
+
+    const text = await r.text();
+    const parsed = jsonFromText(text);
+
+    if (!r.ok || !parsed) {
+      if (historyCache) {
+        return res
+          .status(200)
+          .json(historyCache);
+      }
+
+      return res
+        .status(502)
+        .json({
+          error: "history unavailable",
+          upstreamStatus: r.status
+        });
+    }
+
+    historyCache = parsed;
+    historyCacheAt = Date.now();
+
+    res.set(
+      "Cache-Control",
+      "no-store"
     );
 
-  } catch {
+    return res
+      .status(200)
+      .json(parsed);
 
-    return fallback;
+  } catch (e) {
 
+    if (historyCache) {
+      res.set(
+        "X-History-Cache",
+        String(historyCacheAt)
+      );
+
+      return res
+        .status(200)
+        .json(historyCache);
+    }
+
+    return res
+      .status(502)
+      .json({
+        error: "history unavailable"
+      });
+
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
+/* HEALTH / CONFIG */
+
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "AMBIKA PANE AI"
+  });
+});
+
+app.get("/api/status", (req, res) => {
+  res.json({
+    ok: true,
+    history: HISTORY_URL
+  });
+});
+
+app.get("/api/config", (req, res) => {
+  res.json({
+    ok: true,
+    registerEnabled: true
+  });
+});
+
+/* ADMIN LOGIN */
+
+app.post("/api/admin/login", (req, res) => {
+
+  if (
+    String(req.body?.password || "") !==
+    ADMIN_PASSWORD
+  ) {
+    return res
+      .status(401)
+      .json({
+        error: "Invalid admin password."
+      });
   }
 
-}
+  return res.json({
+    ok: true,
+    token: issueToken()
+  });
+});
 
+app.post("/api/admin/logout", (req, res) => {
 
-function writeJSON(file, data) {
+  const token = String(
+    req.headers.authorization || ""
+  ).replace(/^Bearer\s+/i, "");
 
-  fs.writeFileSync(
-    file,
-    JSON.stringify(
-      data,
-      null,
-      2
+  adminTokens.delete(token);
+
+  res.json({
+    ok: true
+  });
+});
+
+app.get("/api/admin/uids", (req, res) => {
+
+  if (!adminAuth(req)) {
+    return res
+      .status(401)
+      .json({
+        error: "unauthorized"
+      });
+  }
+
+  res.json(clean());
+});
+
+/* UID ACTIVATION */
+
+app.post("/api/admin/activate", (req, res) => {
+
+  if (!adminAuth(req)) {
+    return res
+      .status(401)
+      .json({
+        error: "unauthorized"
+      });
+  }
+
+  const uid = String(
+    req.body?.uid || ""
+  );
+
+  const hours = Number(
+    req.body?.hours
+  );
+
+  if (
+    !validUid(uid) ||
+    ![1, 24].includes(hours)
+  ) {
+    return res
+      .status(400)
+      .json({
+        error:
+          "Game UID must be 5–8 digits and duration must be 1 or 24 hours."
+      });
+  }
+
+  const a = clean();
+
+  const existing = a.find(
+    x => x.uid === uid
+  );
+
+  if (existing) {
+    return res
+      .status(409)
+      .json({
+        error: "UID is already active."
+      });
+  }
+
+  const now = Date.now();
+
+  const item = {
+    uid,
+    deviceId: "",
+    activatedAt: now,
+    expiresAt:
+      now +
+      hours *
+        60 *
+        60 *
+        1000
+  };
+
+  a.push(item);
+
+  writeDB(a);
+
+  accessRequests.delete(uid);
+
+  res.json({
+    ok: true,
+    ...item
+  });
+});
+/* LOCK UID */
+
+app.post("/api/admin/lock", (req, res) => {
+
+  if (!adminAuth(req)) {
+    return res
+      .status(401)
+      .json({
+        error: "unauthorized"
+      });
+  }
+
+  const uid = String(
+    req.body?.uid || ""
+  );
+
+  if (!validUid(uid)) {
+    return res
+      .status(400)
+      .json({
+        error: "invalid UID"
+      });
+  }
+
+  writeDB(
+    clean().filter(
+      x => x.uid !== uid
     )
   );
 
-}
+  res.json({
+    ok: true
+  });
+});
 
+/* LOCK ALL */
 
-/* ================================
-   ADMIN TOKENS
-================================ */
+app.post("/api/admin/lock-all", (req, res) => {
 
-const adminTokens =
-  new Map();
+  if (!adminAuth(req)) {
+    return res
+      .status(401)
+      .json({
+        error: "unauthorized"
+      });
+  }
 
-const TOKEN_LIFETIME =
-  12 * 60 * 60 * 1000;
+  writeDB([]);
 
+  res.json({
+    ok: true
+  });
+});
 
-function createAdminToken() {
+/* OLD COMPATIBILITY ACTIVATION ROUTE */
 
-  const token =
-    crypto.randomBytes(32)
-      .toString("hex");
+app.post("/api/admin/uid", (req, res) => {
 
-  adminTokens.set(
-    token,
-    {
-      expiresAt:
-        Date.now() +
-        TOKEN_LIFETIME
-    }
+  if (!adminAuth(req)) {
+    return res
+      .status(401)
+      .json({
+        error: "unauthorized"
+      });
+  }
+
+  const uid = String(
+    req.body?.uid || ""
   );
 
-  return token;
-
-}
-
-
-function isValidAdminToken(token) {
-
-  if (!token) return false;
-
-  const session =
-    adminTokens.get(token);
-
-  if (!session) return false;
+  const hours = Number(
+    req.body?.durationHours
+  );
 
   if (
-    Date.now() >
-    session.expiresAt
+    !validUid(uid) ||
+    ![1, 24].includes(hours)
   ) {
-
-    adminTokens.delete(token);
-
-    return false;
-
+    return res
+      .status(400)
+      .json({
+        error:
+          "invalid UID or duration"
+      });
   }
 
-  return true;
-
-}
-
-
-function requireAdmin(
-  req,
-  res,
-  next
-) {
-
-  const auth =
-    req.headers.authorization ||
-    "";
-
-  const token =
-    auth.startsWith("Bearer ")
-      ? auth.slice(7)
-      : "";
+  const a = clean();
 
   if (
-    !isValidAdminToken(token)
+    a.some(
+      x => x.uid === uid
+    )
   ) {
-
-    return res.status(401).json({
-
-      success: false,
-
-      message:
-        "Admin authentication required."
-
-    });
-
+    return res
+      .status(409)
+      .json({
+        error:
+          "UID is already active"
+      });
   }
 
-  req.adminToken =
-    token;
-
-  next();
-
-}
-
-
-/* ================================
-   EXPIRED UID CLEANUP
-================================ */
-
-function cleanExpiredUIDs() {
-
-  const uids =
-    readJSON(
-      UID_FILE,
-      []
-    );
-
-  const now =
-    Date.now();
-
-  const active =
-    uids.filter(item => {
-
-      if (
-        !item.expiresAt ||
-        item.expiresAt > now
-      ) {
-
-        return true;
-
-      }
-
-      return false;
-
-    });
-
-
-  if (
-    active.length !==
-    uids.length
-  ) {
-
-    writeJSON(
-      UID_FILE,
-      active
-    );
-
-  }
-
-  return active;
-
-}
-
-
-/* ================================
-   STATUS
-================================ */
-
-app.get(
-  "/api/status",
-  (req, res) => {
-
-    res.json({
-
-      success: true,
-
-      online: true,
-
-      service:
-        "AMBIKA PANE AI"
-
-    });
-
-  }
-);
-
-
-/* ================================
-   CONFIG
-================================ */
-
-app.get(
-  "/api/config",
-  (req, res) => {
-
-    res.json({
-
-      success: true,
-
-      registerUrl:
-        REGISTER_URL,
-
-      historyUrl:
-        "/api/history"
-
-    });
-
-  }
-);
-
-
-/* ================================
-   ADMIN LOGIN
-================================ */
-
-app.post(
-  "/api/admin/login",
-  (req, res) => {
-
-    const password =
-      String(
-        req.body.password ||
-        ""
-      );
-
-    if (
-      password !==
-      ADMIN_PASSWORD
-    ) {
-
-      return res.status(401).json({
-
-        success: false,
-
-        message:
-          "Invalid admin password."
-
-      });
-
-    }
-
-
-    const token =
-      createAdminToken();
-
-
-    res.json({
-
-      success: true,
-
-      token,
-
-      expiresIn:
-        TOKEN_LIFETIME
-
-    });
-
-  }
-);
-
-
-/* ================================
-   ADMIN LOGOUT
-================================ */
-
-app.post(
-  "/api/admin/logout",
-  requireAdmin,
-  (req, res) => {
-
-    adminTokens.delete(
-      req.adminToken
-    );
-
-    res.json({
-      success: true
-    });
-
-  }
-);
-
-
-/* ================================
-   ADMIN UID LIST
-================================ */
-
-app.get(
-  "/api/admin/uids",
-  requireAdmin,
-  (req, res) => {
-
-    const uids =
-      cleanExpiredUIDs();
-
-    res.json({
-
-      success: true,
-
-      uids
-
-    });
-
-  }
-);
-
-
-/* ================================
-   MEMBER REQUEST UID
-================================ */
-
-app.post(
-  "/api/access/request",
-  (req, res) => {
-
-    const uid =
-      String(
-        req.body.uid ||
-        ""
-      ).trim();
-
-    const deviceId =
-      String(
-        req.body.deviceId ||
-        ""
-      ).trim();
-
-
-    if (!uid) {
-
-      return res.status(400).json({
-
-        success: false,
-
-        message:
-          "UID is required."
-
-      });
-
-    }
-
-
-    if (!deviceId) {
-
-      return res.status(400).json({
-
-        success: false,
-
-        message:
-          "Device ID is required."
-
-      });
-
-    }
-
-
-    const activeUIDs =
-      cleanExpiredUIDs();
-
-
-    const existing =
-      activeUIDs.find(
-        item =>
-          item.uid === uid
-      );
-
-
-    if (existing) {
-
-      if (
-        existing.deviceId &&
-        existing.deviceId !==
-          deviceId
-      ) {
-
-        return res.json({
-
-          success: false,
-
-          status:
-            "bound_other_device",
-
-          message:
-            "This UID is already active on another device."
-
-        });
-
-      }
-
-
-      return res.json({
-
-        success: true,
-
-        status: "active",
-
-        uid
-
-      });
-
-    }
-
-
-    let requests =
-      readJSON(
-        REQUEST_FILE,
-        []
-      );
-
-
-    const sameRequest =
-      requests.find(
-        item =>
-          item.uid === uid &&
-          item.deviceId ===
-            deviceId &&
-          item.status ===
-            "pending"
-      );
-
-
-    if (sameRequest) {
-
-      return res.json({
-
-        success: true,
-
-        status: "pending",
-
-        message:
-          "Your UID request is already waiting for admin approval."
-
-      });
-
-    }
-
-
-    requests.push({
-
-      uid,
-
-      deviceId,
-
-      requestedAt:
-        Date.now(),
-
-      lastSeenAt:
-        Date.now(),
-
-      status:
-        "pending"
-
-    });
-
-
-    if (
-      requests.length > 500
-    ) {
-
-      requests =
-        requests.slice(-500);
-
-    }
-
-
-    writeJSON(
-      REQUEST_FILE,
-      requests
-    );
-
-
-    res.json({
-
-      success: true,
-
-      status: "pending",
-
-      message:
-        "UID request sent. Waiting for admin approval."
-
-    });
-
-  }
-);
-/* ================================
-   MEMBER ACCESS CHECK
-================================ */
-
-app.post(
-  "/api/access/check",
-  (req, res) => {
-
-    const uid =
-      String(
-        req.body.uid || ""
-      ).trim();
-
-    const deviceId =
-      String(
-        req.body.deviceId || ""
-      ).trim();
-
-
-    if (!uid || !deviceId) {
-
-      return res.status(400).json({
-
-        success: false,
-
-        status: "invalid",
-
-        message:
-          "UID and device ID are required."
-
-      });
-
-    }
-
-
-    const uids =
-      cleanExpiredUIDs();
-
-
-    const item =
-      uids.find(
-        x =>
-          x.uid === uid
-      );
-
-
-    /* UID NOT ACTIVE */
-
-    if (!item) {
-
-      return res.json({
-
-        success: false,
-
-        status: "inactive",
-
-        message:
-          "UID is not active. Request activation."
-
-      });
-
-    }
-
-
-    /* DEVICE ALREADY BOUND */
-
-    if (
-      item.deviceId &&
-      item.deviceId !== deviceId
-    ) {
-
-      return res.json({
-
-        success: false,
-
-        status:
-          "bound_other_device",
-
-        message:
-          "This UID is already bound to another device."
-
-      });
-
-    }
-
-
-    /* FIRST DEVICE CLAIM */
-
-    if (!item.deviceId) {
-
-      item.deviceId =
-        deviceId;
-
-      item.boundAt =
-        Date.now();
-
-
-      writeJSON(
-        UID_FILE,
-        uids
-      );
-
-    }
-
-
-    res.json({
-
-      success: true,
-
-      status: "active",
-
-      uid:
-        item.uid,
-
-      deviceId:
-        item.deviceId,
-
-      activatedAt:
-        item.activatedAt,
-
-      expiresAt:
-        item.expiresAt
-
-    });
-
-  }
-);
-
-
-/* ================================
-   ACCESS STATUS
-================================ */
-
-app.post(
-  "/api/access/status",
-  (req, res) => {
-
-    const uid =
-      String(
-        req.body.uid || ""
-      ).trim();
-
-    const deviceId =
-      String(
-        req.body.deviceId || ""
-      ).trim();
-
-
-    const uids =
-      cleanExpiredUIDs();
-
-
-    const item =
-      uids.find(
-        x =>
-          x.uid === uid
-      );
-
-
-    if (!item) {
-
-      return res.json({
-
-        success: false,
-
-        status:
-          "inactive"
-
-      });
-
-    }
-
-
-    if (
-      item.deviceId &&
-      item.deviceId !== deviceId
-    ) {
-
-      return res.json({
-
-        success: false,
-
-        status:
-          "bound_other_device"
-
-      });
-
-    }
-
-
-    res.json({
-
-      success: true,
-
-      status:
-        "active",
-
-      uid:
-        item.uid,
-
-      expiresAt:
-        item.expiresAt
-
-    });
-
-  }
-);
-
-
-/* ================================
-   ADMIN PENDING REQUESTS
-================================ */
-
-app.get(
-  "/api/admin/requests",
-  requireAdmin,
-  (req, res) => {
-
-    const requests =
-      readJSON(
-        REQUEST_FILE,
-        []
-      );
-
-
-    const pending =
-      requests.filter(
-        item =>
-          item.status ===
-          "pending"
-      );
-
-
-    res.json({
-
-      success: true,
-
-      requests:
-        pending
-
-    });
-
-  }
-);
-
-
-/* ================================
-   ADMIN ACTIVATE UID
-================================ */
-
-app.post(
-  "/api/admin/activate",
-  requireAdmin,
-  (req, res) => {
-
-    const uid =
-      String(
-        req.body.uid || ""
-      ).trim();
-
-    const hours =
-      Number(
-        req.body.hours
-      ) || 24;
-
-
-    if (!uid) {
-
-      return res.status(400).json({
-
-        success: false,
-
-        message:
-          "UID is required."
-
-      });
-
-    }
-
-
-    if (
-      hours !== 1 &&
-      hours !== 24
-    ) {
-
-      return res.status(400).json({
-
-        success: false,
-
-        message:
-          "Duration must be 1 or 24 hours."
-
-      });
-
-    }
-
-
-    let uids =
-      cleanExpiredUIDs();
-
-
-    const existing =
-      uids.find(
-        item =>
-          item.uid === uid
-      );
-
-
-    if (existing) {
-
-      return res.json({
-
-        success: false,
-
-        message:
-          "UID is already active."
-
-      });
-
-    }
-
-
-    let requests =
-      readJSON(
-        REQUEST_FILE,
-        []
-      );
-
-
-    /*
-      Find the member's pending request.
-      The requested device gets bound
-      when admin activates the UID.
-    */
-
-    const request =
-      requests.find(
-        item =>
-          item.uid === uid &&
-          item.status ===
-            "pending"
-      );
-
-
-    const now =
-      Date.now();
-
-
-    const expiresAt =
+  const now = Date.now();
+
+  const item = {
+    uid,
+    deviceId: "",
+    activatedAt: now,
+    expiresAt:
       now +
       hours *
-      60 *
-      60 *
-      1000;
+        3600000
+  };
 
+  a.push(item);
 
-    const newUID = {
+  writeDB(a);
 
-      uid:
+  accessRequests.delete(uid);
 
-        uid,
+  res.json(item);
+});
 
-      deviceId:
+/* UID ACCESS CHECK */
 
-        request
-          ? request.deviceId
-          : null,
+app.post("/api/access/check", (req, res) => {
 
-      activatedAt:
+  const uid = String(
+    req.body?.uid || ""
+  );
 
-        now,
+  const deviceId = String(
+    req.body?.deviceId || ""
+  );
 
-      expiresAt:
-
-        expiresAt,
-
-      durationHours:
-
-        hours,
-
-      boundAt:
-
-        request
-          ? now
-          : null
-
-    };
-
-
-    uids.push(
-      newUID
-    );
-
-
-    writeJSON(
-      UID_FILE,
-      uids
-    );
-
-
-    /* Mark request approved */
-
-    if (request) {
-
-      requests =
-        requests.map(
-          item => {
-
-            if (
-              item.uid === uid &&
-              item.status ===
-                "pending"
-            ) {
-
-              return {
-
-                ...item,
-
-                status:
-                  "approved",
-
-                approvedAt:
-                  now
-
-              };
-
-            }
-
-
-            return item;
-
-          }
-        );
-
-
-      writeJSON(
-        REQUEST_FILE,
-        requests
-      );
-
-    }
-
-
-    res.json({
-
-      success: true,
-
-      uid:
-
-        uid,
-
-      expiresAt:
-
-        expiresAt,
-
-      deviceId:
-
-        newUID.deviceId
-
-    });
-
-  }
-);
-
-
-/* ================================
-   ADMIN LOCK UID
-================================ */
-
-app.post(
-  "/api/admin/lock",
-  requireAdmin,
-  (req, res) => {
-
-    const uid =
-      String(
-        req.body.uid || ""
-      ).trim();
-
-
-    if (!uid) {
-
-      return res.status(400).json({
-
-        success: false,
-
-        message:
-          "UID is required."
-
+  if (
+    !validUid(uid) ||
+    !deviceId
+  ) {
+    return res
+      .status(400)
+      .json({
+        active: false,
+        error:
+          "Invalid UID or device."
       });
-
-    }
-
-
-    const uids =
-      cleanExpiredUIDs();
-
-
-    const filtered =
-      uids.filter(
-        item =>
-          item.uid !== uid
-      );
-
-
-    writeJSON(
-      UID_FILE,
-      filtered
-    );
-
-
-    res.json({
-
-      success: true,
-
-      message:
-        "UID locked successfully."
-
-    });
-
   }
-);
 
+  const a = clean();
 
-/* ================================
-   ADMIN LOCK ALL
-================================ */
+  const x = a.find(
+    v => v.uid === uid
+  );
 
-app.post(
-  "/api/admin/lock-all",
-  requireAdmin,
-  (req, res) => {
-
-    writeJSON(
-      UID_FILE,
-      []
-    );
-
-
-    res.json({
-
-      success: true,
-
-      message:
-        "All UID access locked."
-
-    });
-
-  }
-);
-/* ================================
-   ADMIN REJECT REQUEST
-================================ */
-
-app.post(
-  "/api/admin/requests/reject",
-  requireAdmin,
-  (req, res) => {
-
-    const uid =
-      String(
-        req.body.uid || ""
-      ).trim();
-
-
-    if (!uid) {
-
-      return res.status(400).json({
-
-        success: false,
-
-        message:
-          "UID is required."
-
+  if (!x) {
+    return res
+      .status(404)
+      .json({
+        active: false,
+        error:
+          "UID is not active / approved."
       });
-
-    }
-
-
-    let requests =
-      readJSON(
-        REQUEST_FILE,
-        []
-      );
-
-
-    let changed = false;
-
-
-    requests =
-      requests.map(
-        item => {
-
-          if (
-            item.uid === uid &&
-            item.status ===
-              "pending"
-          ) {
-
-            changed = true;
-
-            return {
-
-              ...item,
-
-              status:
-                "rejected",
-
-              rejectedAt:
-                Date.now()
-
-            };
-
-          }
-
-
-          return item;
-
-        }
-      );
-
-
-    writeJSON(
-      REQUEST_FILE,
-      requests
-    );
-
-
-    res.json({
-
-      success:
-        changed,
-
-      message:
-        changed
-          ? "Request rejected."
-          : "Pending request not found."
-
-    });
-
   }
-);
 
+  /* FIRST VERIFIED DEVICE
+     GETS BOUND TO UID */
 
-/* ================================
-   LIVE HISTORY PROXY
-================================ */
+  if (!x.deviceId) {
 
-let historyCache =
-  null;
+    x.deviceId = deviceId;
 
+    writeDB(a);
+
+    return res.json({
+      ...x,
+      active: true,
+      status: "active",
+      boundNow: true
+    });
+  }
+
+  /* DIFFERENT DEVICE */
+
+  if (
+    x.deviceId !== deviceId
+  ) {
+    return res
+      .status(409)
+      .json({
+        active: false,
+        error:
+          "This UID is already bound to another device."
+      });
+  }
+
+  res.json({
+    ...x,
+    active: true,
+    status: "active"
+  });
+});
+
+/* SAVE PENDING REQUEST */
+
+app.post("/api/access/request", (req, res) => {
+
+  const uid = String(
+    req.body?.uid || ""
+  );
+
+  const deviceId = String(
+    req.body?.deviceId || ""
+  );
+
+  if (
+    !validUid(uid) ||
+    !deviceId
+  ) {
+    return res
+      .status(400)
+      .json({
+        ok: false,
+        error:
+          "Invalid request."
+      });
+  }
+
+  const active = clean().find(
+    x => x.uid === uid
+  );
+
+  if (active) {
+    return res.json({
+      ok: true,
+      alreadyActive: true
+    });
+  }
+
+  accessRequests.set(uid, {
+    uid,
+    deviceId,
+    requestedAt: Date.now()
+  });
+
+  res.json({
+    ok: true,
+    pending: true
+  });
+});
+
+/* ACCESS STATUS */
+
+app.post("/api/access/status", (req, res) => {
+
+  const uid = String(
+    req.body?.uid || ""
+  );
+
+  const deviceId = String(
+    req.body?.deviceId || ""
+  );
+
+  if (
+    !validUid(uid) ||
+    !deviceId
+  ) {
+    return res
+      .status(400)
+      .json({
+        active: false
+      });
+  }
+
+  const x = clean().find(
+    v => v.uid === uid
+  );
+
+  if (!x) {
+    return res
+      .status(404)
+      .json({
+        active: false
+      });
+  }
+
+  if (
+    x.deviceId &&
+    x.deviceId !== deviceId
+  ) {
+    return res
+      .status(409)
+      .json({
+        active: false,
+        error:
+          "UID bound to another device."
+      });
+  }
+
+  res.json({
+    ...x,
+    active: true,
+    status: "active"
+  });
+});
+
+/* ADMIN PENDING REQUESTS */
+
+app.get("/api/admin/requests", (req, res) => {
+
+  if (!adminAuth(req)) {
+    return res
+      .status(401)
+      .json({
+        error: "unauthorized"
+      });
+  }
+
+  res.json(
+    [...accessRequests.values()]
+      .sort(
+        (a, b) =>
+          b.requestedAt -
+          a.requestedAt
+      )
+  );
+});
+/* LEGACY GET ACCESS ROUTE */
 
 app.get(
-  "/api/history",
-  async (req, res) => {
-
-    const controller =
-      new AbortController();
-
-
-    const timeout =
-      setTimeout(
-        () => {
-          controller.abort();
-        },
-        10000
-      );
-
-
-    try {
-
-      const url =
-        HISTORY_URL +
-        "?_t=" +
-        Date.now();
-
-
-      const response =
-        await fetch(
-          url,
-          {
-            method:
-              "GET",
-
-            headers: {
-
-              "Accept":
-                "application/json,text/plain,*/*",
-
-              "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
-
-              "Referer":
-                "https://draw.ar-lottery01.com/"
-
-            },
-
-            signal:
-              controller.signal
-
-          }
-        );
-
-
-      if (!response.ok) {
-
-        throw new Error(
-          "History API HTTP " +
-          response.status
-        );
-
-      }
-
-
-      const data =
-        await response.json();
-
-
-      /*
-        Save the last successful
-        live response.
-      */
-
-      historyCache =
-        data;
-
-
-      res.json(data);
-
-    }
-    catch (error) {
-
-      console.error(
-        "History proxy error:",
-        error.message
-      );
-
-
-      /*
-        If upstream is temporarily
-        unavailable, return the last
-        successful API response.
-      */
-
-      if (historyCache) {
-
-        return res.json(
-          historyCache
-        );
-
-      }
-
-
-      res.json({
-
-        success:
-          false,
-
-        data: {
-
-          list: []
-
-        },
-
-        message:
-          "Live result connection temporarily unavailable."
-
-      });
-
-    }
-    finally {
-
-      clearTimeout(
-        timeout
-      );
-
-    }
-
-  }
-);
-
-
-/* ================================
-   HEALTH CHECK
-================================ */
-
-app.get(
-  "/health",
+  "/api/access/:uid",
   (req, res) => {
 
-    res.status(200).json({
+    const uid = String(
+      req.params.uid
+    );
 
-      status:
-        "ok",
+    const deviceId = String(
+      req.query.deviceId || ""
+    );
 
-      service:
-        "AMBIKA PANE AI"
+    if (
+      !validUid(uid) ||
+      !deviceId
+    ) {
+      return res
+        .status(400)
+        .json({
+          active: false
+        });
+    }
 
+    const x = clean().find(
+      v => v.uid === uid
+    );
+
+    if (!x) {
+      return res
+        .status(404)
+        .json({
+          active: false
+        });
+    }
+
+    if (
+      x.deviceId &&
+      x.deviceId !== deviceId
+    ) {
+      return res
+        .status(409)
+        .json({
+          active: false
+        });
+    }
+
+    /* BIND FIRST DEVICE */
+
+    if (!x.deviceId) {
+
+      const a = clean();
+
+      const row = a.find(
+        v => v.uid === uid
+      );
+
+      row.deviceId =
+        deviceId;
+
+      writeDB(a);
+
+      return res.json({
+        ...row,
+        active: true
+      });
+    }
+
+    res.json({
+      ...x,
+      active: true
     });
-
   }
 );
-/* ================================
-   STATIC FRONTEND
-================================ */
+
+/* ACCESS BY DEVICE */
+
+app.get(
+  "/api/access/device/:deviceId",
+  (req, res) => {
+
+    const deviceId = String(
+      req.params.deviceId || ""
+    );
+
+    const x = clean().find(
+      v =>
+        v.deviceId ===
+        deviceId
+    );
+
+    if (!x) {
+      return res
+        .status(404)
+        .json({
+          active: false
+        });
+    }
+
+    res.json({
+      ...x,
+      active: true
+    });
+  }
+);
+
+/* STATIC FRONTEND */
 
 app.use(
   express.static(
-    PUBLIC_DIR
+    path.join(
+      __dirname,
+      "public"
+    )
   )
 );
 
+/* EXPRESS 5 SPA FALLBACK */
 
-/* ================================
-   EXPRESS 5 FALLBACK
-================================ */
-
-app.use(
-  (req, res, next) => {
-
-    if (
-      req.method !== "GET" ||
-      req.path.startsWith("/api/")
-    ) {
-
-      return next();
-
-    }
-
-
+app.get(
+  "/{*splat}",
+  (req, res) => {
     res.sendFile(
       path.join(
-        PUBLIC_DIR,
+        __dirname,
+        "public",
         "index.html"
       )
     );
-
   }
 );
 
-
-/* ================================
-   ERROR HANDLER
-================================ */
-
-app.use(
-  (err, req, res, next) => {
-
-    console.error(
-      "Server error:",
-      err
-    );
-
-
-    res.status(500).json({
-
-      success: false,
-
-      message:
-        "Internal server error."
-
-    });
-
-  }
-);
-
-
-/* ================================
-   START SERVER
-================================ */
+/* START SERVER */
 
 app.listen(
   PORT,
-  "0.0.0.0",
-  () => {
-
+  () =>
     console.log(
-      `AMBIKA PANE AI running on port ${PORT}`
-    );
-
-  }
+      "AMBIKA PANE AI running on port " +
+        PORT
+    )
 );
