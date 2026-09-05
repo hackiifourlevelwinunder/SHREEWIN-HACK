@@ -328,6 +328,7 @@ button{font:inherit}
 (() => {
   "use strict";
 
+  const API_URL="https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
   const REGISTER_URL = "https://www.shreewin55.com/#/register?invitationCode=86286195967";
   const FIRST_VOICE_URL = "https://www.image2url.com/r2/default/audio/1788601237629-ae72506e-6dd9-4f75-8c03-b0383f16e698.mp3";
   const SECOND_VOICE_URL = "https://www.image2url.com/r2/default/audio/1788602798484-4fe76aab-b340-451d-aa47-eb2c157e4ea4.mp3";
@@ -344,6 +345,11 @@ button{font:inherit}
   let deviceId = localStorage.getItem(DEVICE_KEY);
   if (!deviceId) { deviceId = crypto.randomUUID ? crypto.randomUUID() : Date.now()+"-"+Math.random(); localStorage.setItem(DEVICE_KEY, deviceId); }
 
+  const r=await fetch(API_URL,{cache:"no-store"});if(!r.ok)throw Error();
+const j=await r.json(),list=getList(j);if(!Array.isArray(list)||!list.length)throw Error();
+renderResults(list);updatePeriod(list);updatePattern(list);
+}catch(e){box.innerHTML='<div class="resultError">Live result connection unavailable.<br>Please refresh or check the server.</div>'}
+ }
   const play = a => { try { a.pause(); a.currentTime=0; const p=a.play(); if(p?.catch)p.catch(()=>{}); } catch(e){} };
   const playFirstVoice=()=>play(firstVoice), playSecondVoice=()=>play(secondVoice);
   const pick=(o,keys)=>{for(const k of keys)if(o?.[k]!==undefined&&o[k]!==null&&o[k]!=="")return o[k];return ""};
